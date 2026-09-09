@@ -1,4 +1,5 @@
 use crate::checkers::AuthZVulnKind::{ApiCall, RemoteCall};
+use crate::checkers::RemoteUserAuthZState::{Bare, HasAccountId};
 use crate::interp::ProjectionVec;
 use crate::utils::projvec_from_str;
 use crate::{
@@ -16,6 +17,7 @@ use crate::{
     worklist::WorkList,
 };
 use core::fmt;
+use std::cmp::min;
 use forge_permission_resolver::permissions_resolver::{
     PermissionHashMap, RequestType, check_url_for_permissions,
 };
@@ -752,18 +754,28 @@ impl RemoteUserAuthZChecker {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RemoteUserAuthZState {}
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RemoteUserAuthZState {
+    Bare,
+    HasAccountId,
+}
 
 impl JoinSemiLattice for RemoteUserAuthZState {
-    const BOTTOM: Self = RemoteUserAuthZState {};
+    const BOTTOM: Self = RemoteUserAuthZState::Bare;
 
-    fn join_changed(&mut self, _other: &Self) -> bool {
-        false
+    #[inline]
+    fn join_changed(&mut self, other: &Self) -> bool {
+        if *other == Bare {
+            let prev = mem::replace(self, *other);
+            prev == *self
+        } else {
+            false
+        }
     }
 
-    fn join(&self, _other: &Self) -> Self {
-        Self::BOTTOM
+    #[inline]
+    fn join(&self, other: &Self) -> Self {
+        min(*self, *other)
     }
 }
 
