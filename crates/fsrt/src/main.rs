@@ -34,8 +34,8 @@ use tracing_tree::HierarchicalLayer;
 use forge_analyzer::{
     checkers::{
         AuthHeaderChecker, AuthZChecker, AuthenticateChecker, ForgeRuntimeVersionPolicyChecker,
-        PermissionChecker, PermissionVuln, SecretChecker, SecretLoggingChecker, SecretType,
-        UnsafeEndpoint,
+        PermissionChecker, PermissionVuln, RemoteUserAuthZChecker, SecretChecker,
+        SecretLoggingChecker, SecretType, UnsafeEndpoint,
     },
     ctx::ModId,
     definitions::{Const, DefId, PackageData, Value},
@@ -562,6 +562,8 @@ pub(crate) fn scan_directory<'a>(
     // Auth-header checks handle uncalled bodies separately in the full-function pass.
     let mut auth_header_interp =
         run_auth_header_scanner.then(|| interpreters.create::<AuthHeaderChecker>(false));
+    let mut remote_authz_interp =
+        run_auth_header_scanner.then(|| interpreters.create::<RemoteUserAuthZChecker>(false));
     let mut perm_interp =
         run_permission_checker.then(|| interpreters.create::<PermissionChecker<'_>>(true));
 
@@ -632,6 +634,23 @@ pub(crate) fn scan_directory<'a>(
             )
         {
             warn!("error while running auth header checker: {err}");
+        }
+
+        if let Some(interp) = &mut remote_authz_interp {
+            let mut checker = RemoteUserAuthZChecker::new();
+            debug!("AEC checking {:?} at {:?}", func.func_name, &func.path);
+            if let Err(err) = interp.run_checker(
+                func.def_id,
+                &mut checker,
+                func.path.clone(),
+                func.func_name.to_string(),
+            ) {
+                warn!(
+                    "error while scanning {:?} in {:?}: {err}",
+                    func.func_name, func.path,
+                );
+            }
+            reporter.add_vulnerabilities(checker.into_vulns());
         }
 
         if func.invokable {

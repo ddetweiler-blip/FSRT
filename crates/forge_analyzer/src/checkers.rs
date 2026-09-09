@@ -17,10 +17,10 @@ use crate::{
     worklist::WorkList,
 };
 use core::fmt;
-use std::cmp::min;
 use forge_permission_resolver::permissions_resolver::{
     PermissionHashMap, RequestType, check_url_for_permissions,
 };
+use std::cmp::min;
 
 use forge_utils::FxHashMap;
 use itertools::Itertools;
@@ -749,6 +749,9 @@ pub struct RemoteUserAuthZChecker {
 }
 
 impl RemoteUserAuthZChecker {
+    pub fn new() -> Self {
+        Self { vulns: Vec::new()}
+    }
     pub fn into_vulns(self) -> impl IntoIterator<Item = RemoteUserAuthZVuln> {
         self.vulns.into_iter()
     }
@@ -756,8 +759,8 @@ impl RemoteUserAuthZChecker {
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RemoteUserAuthZState {
-    Bare,
     HasAccountId,
+    Bare,
 }
 
 impl JoinSemiLattice for RemoteUserAuthZState {
@@ -765,17 +768,13 @@ impl JoinSemiLattice for RemoteUserAuthZState {
 
     #[inline]
     fn join_changed(&mut self, other: &Self) -> bool {
-        if *other == Bare {
-            let prev = mem::replace(self, *other);
-            prev == *self
-        } else {
-            false
-        }
+        let prev = mem::replace(self, self.join(other));
+        prev == *self
     }
 
     #[inline]
     fn join(&self, other: &Self) -> Self {
-        min(*self, *other)
+        max(*self, *other)
     }
 }
 
@@ -793,12 +792,34 @@ impl<'cx> Dataflow<'cx> for RemoteUserAuthZChecker {
         _loc: Location,
         _block: &'cx BasicBlock,
         _intrinsic: &'cx Intrinsic,
-        _initial_state: Self::State,
+        initial_state: Self::State,
         _operands: SmallVec<[crate::ir::Operand; 4]>,
     ) -> Self::State {
-        Self::State::BOTTOM
+       initial_state
+    }
+
+    fn transfer_rvalue<C: Runner<'cx, State = Self::State>>(
+        &mut self,
+        interp: &mut Interp<'cx, C>,
+        _def: DefId,
+        _loc: Location,
+        _block: &'cx BasicBlock,
+        rvalue: &'cx Rvalue,
+        initial_state: Self::State,
+    ) -> Self::State
+    {
+        match rvalue {
+            // How do we determine if the variable refers to the original accountId?
+            Rvalue::Read(Operand::Var(vid)) => {
+                println!("{:?}", vid.base);
+                Self::State::HasAccountId
+            },
+            _ => initial_state,
+        }
     }
 }
+
+impl Runner for RemoteUserAuthZChecker
 
 pub struct SecretDataflow {
     needs_call: Vec<DefId>,
