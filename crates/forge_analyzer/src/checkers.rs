@@ -16,10 +16,10 @@ use crate::{
     worklist::WorkList,
 };
 use core::fmt;
-use std::fmt::format;
 use forge_permission_resolver::permissions_resolver::{
     PermissionHashMap, RequestType, check_url_for_permissions,
 };
+
 use forge_utils::FxHashMap;
 use itertools::Itertools;
 use regex::{Regex, RegexSet};
@@ -694,7 +694,7 @@ pub struct UnsafeEndpoint<'a> {
 }
 
 impl<'a> UnsafeEndpoint<'a> {
-    pub const DESC: &'static str = "An endpoint declared in this manifest passes an app system token. Remote calls that pass system tokens must also *explicitly* pass the user account ID associated with the request."
+    pub const DESC: &'static str = "An endpoint declared in this manifest passes an app system token. Remote calls that pass system tokens must also *explicitly* pass the user account ID associated with the request.";
 
     pub fn new(key: &'a str) -> Self {
         Self { key }
@@ -707,7 +707,10 @@ impl<'a> IntoVuln for UnsafeEndpoint<'a> {
             check_name: "aec-remote-auth".to_string(),
             description: Self::DESC.to_string(),
             recommendation: "Endpoint and remote should omit `auth.appSystemToken: true`",
-            proof: format!("Endpoint `{}` declares `auth.appSystemToken: true`", self.key),
+            proof: format!(
+                "Endpoint `{}` declares `auth.appSystemToken: true`",
+                self.key
+            ),
             app_key: reporter.app_key().to_string(),
             severity: Severity::High,
             app_name: reporter.app_name().to_string(),
@@ -718,9 +721,9 @@ impl<'a> IntoVuln for UnsafeEndpoint<'a> {
 }
 
 pub struct RemoteUserAuthZVuln {
-    stack: String,
-    entry_func: String,
-    file: PathBuf,
+    _stack: String,
+    _entry_func: String,
+    _file: PathBuf,
 }
 
 impl IntoVuln for RemoteUserAuthZVuln {
@@ -746,6 +749,42 @@ pub struct RemoteUserAuthZChecker {
 impl RemoteUserAuthZChecker {
     pub fn into_vulns(self) -> impl IntoIterator<Item = RemoteUserAuthZVuln> {
         self.vulns.into_iter()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RemoteUserAuthZState {}
+
+impl JoinSemiLattice for RemoteUserAuthZState {
+    const BOTTOM: Self = RemoteUserAuthZState {};
+
+    fn join_changed(&mut self, _other: &Self) -> bool {
+        false
+    }
+
+    fn join(&self, _other: &Self) -> Self {
+        Self::BOTTOM
+    }
+}
+
+impl<'cx> Dataflow<'cx> for RemoteUserAuthZChecker {
+    type State = RemoteUserAuthZState;
+
+    fn with_interp<C: Runner<'cx, State = Self::State>>(_interp: &Interp<'cx, C>) -> Self {
+        Self { vulns: Vec::new() }
+    }
+
+    fn transfer_intrinsic<C: Runner<'cx, State = Self::State>>(
+        &mut self,
+        _interp: &mut Interp<'cx, C>,
+        _def: DefId,
+        _loc: Location,
+        _block: &'cx BasicBlock,
+        _intrinsic: &'cx Intrinsic,
+        _initial_state: Self::State,
+        _operands: SmallVec<[crate::ir::Operand; 4]>,
+    ) -> Self::State {
+        Self::State::BOTTOM
     }
 }
 
