@@ -757,7 +757,7 @@ impl RemoteUserAuthZChecker {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum RemoteUserAuthZState {
     HasAccountId,
     Bare,
@@ -778,7 +778,17 @@ impl JoinSemiLattice for RemoteUserAuthZState {
     }
 }
 
-impl<'cx> Dataflow<'cx> for RemoteUserAuthZChecker {
+pub struct RemoteUserAuthZDataFlow {
+    vulns: Vec<RemoteUserAuthZVuln>,
+}
+
+impl RemoteUserAuthZDataFlow {
+    pub fn new() -> Self {
+        Self { vulns: Vec::new()}
+    }
+}
+
+impl<'cx> Dataflow<'cx> for RemoteUserAuthZDataFlow {
     type State = RemoteUserAuthZState;
 
     fn with_interp<C: Runner<'cx, State = Self::State>>(_interp: &Interp<'cx, C>) -> Self {
@@ -819,7 +829,22 @@ impl<'cx> Dataflow<'cx> for RemoteUserAuthZChecker {
     }
 }
 
-impl Runner for RemoteUserAuthZChecker
+impl<'cx> Runner<'cx> for RemoteUserAuthZChecker {
+    type State = RemoteUserAuthZState;
+    type Dataflow =  RemoteUserAuthZDataFlow;
+
+    fn visit_intrinsic(
+        &mut self,
+        _interp: &Interp<'cx, Self>,
+        _intrinsic: &'cx Intrinsic,
+        _def: DefId,
+        _state: &Self::State,
+        _operands: Option<SmallVec<[Operand; 4]>>,
+    ) -> ControlFlow<(), Self::State>
+    {
+        ControlFlow::Continue(Bare)
+    }
+}
 
 pub struct SecretDataflow {
     needs_call: Vec<DefId>,
