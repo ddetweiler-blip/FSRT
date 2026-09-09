@@ -1,5 +1,4 @@
 use crate::checkers::AuthZVulnKind::{ApiCall, RemoteCall};
-use crate::checkers::RemoteUserAuthZState::{Bare, HasAccountId};
 use crate::interp::ProjectionVec;
 use crate::utils::projvec_from_str;
 use crate::{
@@ -20,7 +19,6 @@ use core::fmt;
 use forge_permission_resolver::permissions_resolver::{
     PermissionHashMap, RequestType, check_url_for_permissions,
 };
-use std::cmp::min;
 
 use forge_utils::FxHashMap;
 use itertools::Itertools;
@@ -723,9 +721,39 @@ impl<'a> IntoVuln for UnsafeEndpoint<'a> {
 }
 
 pub struct RemoteUserAuthZVuln {
-    _stack: String,
-    _entry_func: String,
-    _file: PathBuf,
+    stack: String,
+    entry_func: String,
+    file: PathBuf,
+}
+
+impl RemoteUserAuthZVuln {
+    fn new(callstack: Vec<Frame>, env: &Environment, entry: &EntryPoint) -> Self {
+        let entry_func = match &entry.kind {
+            EntryKind::Function(func) => func.clone(),
+            EntryKind::Resolver(res, prop) => format!("{res}.{prop}"),
+            EntryKind::Empty => {
+                warn!("empty function");
+                String::new()
+            }
+        };
+        let file = entry.file.clone();
+        let stack = Itertools::intersperse(
+            iter::once(&*entry_func).chain(
+                callstack
+                    .into_iter()
+                    .rev()
+                    .map(|frame| env.def_name(frame.calling_function)),
+            ),
+            " -> ",
+        )
+        .collect();
+
+        Self {
+            stack,
+            entry_func,
+            file,
+        }
+    }
 }
 
 impl IntoVuln for RemoteUserAuthZVuln {
@@ -734,24 +762,31 @@ impl IntoVuln for RemoteUserAuthZVuln {
             check_name: String::new(),
             description: String::new(),
             recommendation: "",
-            proof: String::new(),
-            app_key: String::new(),
+            proof: format!(
+                "{} {} {}",
+                self.file.as_os_str().to_str().unwrap_or("<unk>"),
+                self.entry_func,
+                self.stack
+            ),
+            app_key: reporter.app_key().to_string(),
             severity: Severity::High,
-            app_name: String::new(),
+            app_name: reporter.app_name().to_string(),
             marketplace_security_requirement: "AEC Requirement 1.10",
             date: reporter.current_date(),
         }
     }
 }
 
+#[derive(Default)]
 pub struct RemoteUserAuthZChecker {
     vulns: Vec<RemoteUserAuthZVuln>,
 }
 
 impl RemoteUserAuthZChecker {
     pub fn new() -> Self {
-        Self { vulns: Vec::new()}
+        Self { vulns: Vec::new() }
     }
+
     pub fn into_vulns(self) -> impl IntoIterator<Item = RemoteUserAuthZVuln> {
         self.vulns.into_iter()
     }
@@ -778,24 +813,29 @@ impl JoinSemiLattice for RemoteUserAuthZState {
     }
 }
 
+#[derive(Default)]
 pub struct RemoteUserAuthZDataFlow {
-    vulns: Vec<RemoteUserAuthZVuln>,
+    needs_call: Vec<DefId>,
 }
 
 impl RemoteUserAuthZDataFlow {
     pub fn new() -> Self {
-        Self { vulns: Vec::new()}
+        Self {
+            needs_call: Vec::new(),
+        }
     }
 }
 
 impl<'cx> Dataflow<'cx> for RemoteUserAuthZDataFlow {
     type State = RemoteUserAuthZState;
 
-    fn with_interp<C: Runner<'cx, State = Self::State>>(_interp: &Interp<'cx, C>) -> Self {
-        Self { vulns: Vec::new() }
+    fn with_interp<C: crate::interp::Runner<'cx, State = Self::State>>(
+        _interp: &Interp<'cx, C>,
+    ) -> Self {
+        Self::new()
     }
 
-    fn transfer_intrinsic<C: Runner<'cx, State = Self::State>>(
+    fn transfer_intrinsic<C: crate::interp::Runner<'cx, State = Self::State>>(
         &mut self,
         _interp: &mut Interp<'cx, C>,
         _def: DefId,
@@ -805,44 +845,72 @@ impl<'cx> Dataflow<'cx> for RemoteUserAuthZDataFlow {
         initial_state: Self::State,
         _operands: SmallVec<[crate::ir::Operand; 4]>,
     ) -> Self::State {
-       initial_state
+        initial_state
     }
 
-    fn transfer_rvalue<C: Runner<'cx, State = Self::State>>(
+    fn transfer_call<C: Runner<'cx, State = Self::State>>(
+        &mut self,
+        interp: &Interp<'cx, C>,
+        def: DefId,
+        loc: Location,
+        _block: &'cx BasicBlock,
+        callee: &'cx crate::ir::Operand,
+        initial_state: Self::State,
+        oprands: SmallVec<[crate::ir::Operand; 4]>,
+    ) -> Self::State {
+        let state =
+            self.super_transfer_call(interp, def, loc, _block, callee, initial_state, oprands);
+
+        let Some((callee_def, _body)) = self.resolve_call(interp, callee) else {
+            return state;
+        };
+
+        self.needs_call.push(callee_def);
+        RemoteUserAuthZState::Bare
+    }
+
+    fn join_term<C: crate::interp::Runner<'cx, State = Self::State>>(
         &mut self,
         interp: &mut Interp<'cx, C>,
-        _def: DefId,
-        _loc: Location,
-        _block: &'cx BasicBlock,
-        rvalue: &'cx Rvalue,
-        initial_state: Self::State,
-    ) -> Self::State
-    {
-        match rvalue {
-            // How do we determine if the variable refers to the original accountId?
-            Rvalue::Read(Operand::Var(vid)) => {
-                println!("{:?}", vid.base);
-                Self::State::HasAccountId
-            },
-            _ => initial_state,
+        def: DefId,
+        block: &'cx BasicBlock,
+        state: Self::State,
+        worklist: &mut WorkList<DefId, BasicBlockId>,
+    ) {
+        self.super_join_term(interp, def, block, state, worklist);
+        for def in self.needs_call.drain(..) {
+            worklist.push_front_blocks(interp.env(), def, interp.call_all);
         }
     }
 }
 
 impl<'cx> Runner<'cx> for RemoteUserAuthZChecker {
     type State = RemoteUserAuthZState;
-    type Dataflow =  RemoteUserAuthZDataFlow;
+    type Dataflow = RemoteUserAuthZDataFlow;
 
     fn visit_intrinsic(
         &mut self,
-        _interp: &Interp<'cx, Self>,
-        _intrinsic: &'cx Intrinsic,
+        interp: &Interp<'cx, Self>,
+        intrinsic: &'cx Intrinsic,
         _def: DefId,
-        _state: &Self::State,
+        state: &Self::State,
         _operands: Option<SmallVec<[Operand; 4]>>,
-    ) -> ControlFlow<(), Self::State>
-    {
-        ControlFlow::Continue(Bare)
+    ) -> ControlFlow<(), Self::State> {
+        match intrinsic {
+            Intrinsic::ApiCall(IntrinsicName::InvokeRemote(Some(_))) => {
+                if *state == Self::State::Bare {
+                    self.vulns.push(RemoteUserAuthZVuln::new(
+                        interp.callstack(),
+                        interp.env(),
+                        interp.entry(),
+                    ));
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(*state)
+                }
+            }
+            _ => ControlFlow::Continue(*state),
+        }
     }
 }
 
@@ -1069,6 +1137,7 @@ impl WithCallStack for SecretVuln {
     fn add_call_stack(&mut self, _stack: Vec<DefId>) {}
 }
 
+// How owrk?
 impl<'cx> Runner<'cx> for SecretChecker {
     type State = SecretState;
     type Dataflow = SecretDataflow;
