@@ -35,7 +35,133 @@ use tracing::{debug, info, warn};
 mod secret_logging;
 pub use secret_logging::{SecretLoggingChecker, SecretLoggingVuln};
 
-pub use crate::taint::{Taint, TaintDataflow};
+pub use crate::taint::Taint;
+
+pub struct TaintDataflow {
+    started: bool,
+}
+
+impl<'cx> Dataflow<'cx> for TaintDataflow {
+    type State = Vec<Taint>;
+
+    fn with_interp<C: Runner<'cx, State = Self::State>>(_interp: &Interp<'cx, C>) -> Self {
+        Self { started: false }
+    }
+
+    fn transfer_call<C: Runner<'cx, State = Self::State>>(
+        &mut self,
+        interp: &Interp<'cx, C>,
+        def: DefId,
+        loc: Location,
+        block: &'cx BasicBlock,
+        callee: &'cx Operand,
+        initial_state: Self::State,
+        oprands: SmallVec<[crate::ir::Operand; 4]>,
+    ) -> Self::State {
+        self.super_transfer_call(
+            interp,
+            def,
+            loc,
+            block,
+            callee,
+            initial_state,
+            oprands.clone(),
+        )
+    }
+
+    fn transfer_intrinsic<C: Runner<'cx, State = Self::State>>(
+        &mut self,
+        _interp: &mut Interp<'cx, C>,
+        _def: DefId,
+        _loc: Location,
+        _block: &'cx BasicBlock,
+        _intrinsic: &'cx Intrinsic,
+        initial_state: Self::State,
+        _operands: SmallVec<[crate::ir::Operand; 4]>,
+    ) -> Self::State {
+        initial_state
+    }
+
+    fn transfer_inst<C: Runner<'cx, State = Self::State>>(
+        &mut self,
+        interp: &mut Interp<'cx, C>,
+        def: DefId,
+        loc: Location,
+        block: &'cx BasicBlock,
+        inst: &'cx Inst,
+        mut initial_state: Self::State,
+    ) -> Self::State {
+        match inst {
+            Inst::Assign(l, v) => {
+                interp.add_value_to_definition(def, l.clone(), v.clone());
+                let Some(var) = l.as_var_id() else {
+                    return initial_state;
+                };
+
+                if let Some(var) = v.as_var() {
+                    let Some(var_id) = var.as_var_id() else {
+                        return initial_state;
+                    };
+                    let taint = initial_state[var_id.0 as usize];
+                    if !self.started && taint == Taint::Yes {
+                        let Some(Projection::Known(s)) = var.projections.first() else {
+                            return initial_state;
+                        };
+                        if *s == "context" {
+                            initial_state[var_id.0 as usize] = Taint::Yes;
+                            self.started = true;
+                        }
+                        return initial_state;
+                    } else {
+                        let new_state = initial_state[var_id.0 as usize].join(&taint);
+                        initial_state[var_id.0 as usize] = new_state;
+                        return initial_state;
+                    }
+                } else if initial_state[var.0 as usize] == Taint::Yes {
+                    initial_state[var.0 as usize] = Taint::Unknown;
+                }
+                initial_state
+            }
+            Inst::Expr(rvalue) => {
+                self.transfer_rvalue(interp, def, loc, block, rvalue, initial_state)
+            }
+        }
+    }
+
+    fn transfer_block<C: Runner<'cx, State = Self::State>>(
+        &mut self,
+        interp: &mut Interp<'cx, C>,
+        def: DefId,
+        bb: BasicBlockId,
+        block: &'cx BasicBlock,
+        mut initial_state: Self::State,
+    ) -> Self::State {
+        if initial_state.len() < interp.body().vars.len() {
+            initial_state.resize(interp.body().vars.len(), Taint::Unknown);
+        }
+        if matches!(interp.entry.kind, EntryKind::Resolver(..)) {
+            debug!("analyzing resolver");
+            let kind = interp.body().vars.get(VarId::from(1));
+            if matches!(kind, Some(VarKind::Arg(_))) {
+                debug!("found taint start");
+                initial_state[1] = Taint::Yes;
+            } else {
+                debug!(first_var = ?kind, "no arguments read");
+            }
+        }
+        for (idx, inst) in block.iter().enumerate() {
+            initial_state = self.transfer_inst(
+                interp,
+                def,
+                Location::new(bb, idx as u32),
+                block,
+                inst,
+                initial_state,
+            );
+        }
+        initial_state
+    }
+}
 
 pub struct AuthorizeDataflow {
     needs_call: Vec<DefId>,
@@ -375,7 +501,7 @@ impl<'cx> Runner<'cx> for AuthZChecker {
             }
             Intrinsic::Fetch => ControlFlow::Continue(*state),
             Intrinsic::ApiCall(name) if *state != AuthorizeState::Yes => match name {
-                IntrinsicName::InvokeRemote(remote) => {
+                IntrinsicName::InvokeRemote(remote, _) => {
                     if !self.check_remotes {
                         ControlFlow::Continue(*state)
                     } else if let Some(remote_name) = remote {
@@ -815,27 +941,49 @@ impl JoinSemiLattice for RemoteUserAuthZState {
 
 #[derive(Default)]
 pub struct RemoteUserAuthZDataFlow {
-    needs_call: Vec<DefId>,
+    // Needs to imitate SecretsDataflow
+    //needs_call: Vec<DefId>,
+    started: bool,
 }
 
 impl RemoteUserAuthZDataFlow {
     pub fn new() -> Self {
         Self {
-            needs_call: Vec::new(),
+            //needs_call: Vec::new(),
+            started: false,
         }
     }
 }
 
 impl<'cx> Dataflow<'cx> for RemoteUserAuthZDataFlow {
-    type State = RemoteUserAuthZState;
+    type State = Vec<Taint>;
 
-    fn with_interp<C: crate::interp::Runner<'cx, State = Self::State>>(
-        _interp: &Interp<'cx, C>,
-    ) -> Self {
+    fn with_interp<C: Runner<'cx, State = Self::State>>(_interp: &Interp<'cx, C>) -> Self {
         Self::new()
     }
 
-    fn transfer_intrinsic<C: crate::interp::Runner<'cx, State = Self::State>>(
+    fn transfer_call<C: Runner<'cx, State = Self::State>>(
+        &mut self,
+        interp: &Interp<'cx, C>,
+        def: DefId,
+        loc: Location,
+        block: &'cx BasicBlock,
+        callee: &'cx Operand,
+        initial_state: Self::State,
+        oprands: SmallVec<[crate::ir::Operand; 4]>,
+    ) -> Self::State {
+        self.super_transfer_call(
+            interp,
+            def,
+            loc,
+            block,
+            callee,
+            initial_state,
+            oprands.clone(),
+        )
+    }
+
+    fn transfer_intrinsic<C: Runner<'cx, State = Self::State>>(
         &mut self,
         _interp: &mut Interp<'cx, C>,
         _def: DefId,
@@ -848,44 +996,89 @@ impl<'cx> Dataflow<'cx> for RemoteUserAuthZDataFlow {
         initial_state
     }
 
-    fn transfer_call<C: Runner<'cx, State = Self::State>>(
-        &mut self,
-        interp: &Interp<'cx, C>,
-        def: DefId,
-        loc: Location,
-        _block: &'cx BasicBlock,
-        callee: &'cx crate::ir::Operand,
-        initial_state: Self::State,
-        oprands: SmallVec<[crate::ir::Operand; 4]>,
-    ) -> Self::State {
-        let state =
-            self.super_transfer_call(interp, def, loc, _block, callee, initial_state, oprands);
-
-        let Some((callee_def, _body)) = self.resolve_call(interp, callee) else {
-            return state;
-        };
-
-        self.needs_call.push(callee_def);
-        RemoteUserAuthZState::Bare
-    }
-
-    fn join_term<C: crate::interp::Runner<'cx, State = Self::State>>(
+    fn transfer_inst<C: Runner<'cx, State = Self::State>>(
         &mut self,
         interp: &mut Interp<'cx, C>,
         def: DefId,
+        loc: Location,
         block: &'cx BasicBlock,
-        state: Self::State,
-        worklist: &mut WorkList<DefId, BasicBlockId>,
-    ) {
-        self.super_join_term(interp, def, block, state, worklist);
-        for def in self.needs_call.drain(..) {
-            worklist.push_front_blocks(interp.env(), def, interp.call_all);
+        inst: &'cx Inst,
+        mut initial_state: Self::State,
+    ) -> Self::State {
+        match inst {
+            Inst::Assign(l, v) => {
+                interp.add_value_to_definition(def, l.clone(), v.clone());
+                let Some(var) = l.as_var_id() else {
+                    return initial_state;
+                };
+
+                if let Some(var) = v.as_var() {
+                    let Some(var_id) = var.as_var_id() else {
+                        return initial_state;
+                    };
+                    let taint = initial_state[var_id.0 as usize];
+                    if !self.started && taint == Taint::Yes {
+                        let Some(Projection::Known(s)) = var.projections.first() else {
+                            return initial_state;
+                        };
+                        if *s == "payload" {
+                            initial_state[var_id.0 as usize] = Taint::Yes;
+                            self.started = true;
+                        }
+                        return initial_state;
+                    } else {
+                        let new_state = initial_state[var_id.0 as usize].join(&taint);
+                        initial_state[var_id.0 as usize] = new_state;
+                        return initial_state;
+                    }
+                } else if initial_state[var.0 as usize] == Taint::Yes {
+                    initial_state[var.0 as usize] = Taint::Unknown;
+                }
+                initial_state
+            }
+            Inst::Expr(rvalue) => {
+                self.transfer_rvalue(interp, def, loc, block, rvalue, initial_state)
+            }
         }
+    }
+
+    fn transfer_block<C: Runner<'cx, State = Self::State>>(
+        &mut self,
+        interp: &mut Interp<'cx, C>,
+        def: DefId,
+        bb: BasicBlockId,
+        block: &'cx BasicBlock,
+        mut initial_state: Self::State,
+    ) -> Self::State {
+        if initial_state.len() < interp.body().vars.len() {
+            initial_state.resize(interp.body().vars.len(), Taint::Unknown);
+        }
+        if matches!(interp.entry.kind, EntryKind::Resolver(..)) {
+            debug!("analyzing resolver");
+            let kind = interp.body().vars.get(VarId::from(1));
+            if matches!(kind, Some(VarKind::Arg(_))) {
+                debug!("found taint start");
+                initial_state[1] = Taint::Yes;
+            } else {
+                debug!(first_var = ?kind, "no arguments read");
+            }
+        }
+        for (idx, inst) in block.iter().enumerate() {
+            initial_state = self.transfer_inst(
+                interp,
+                def,
+                Location::new(bb, idx as u32),
+                block,
+                inst,
+                initial_state,
+            );
+        }
+        initial_state
     }
 }
 
 impl<'cx> Runner<'cx> for RemoteUserAuthZChecker {
-    type State = RemoteUserAuthZState;
+    type State = Vec<Taint>;
     type Dataflow = RemoteUserAuthZDataFlow;
 
     fn visit_intrinsic(
@@ -897,8 +1090,8 @@ impl<'cx> Runner<'cx> for RemoteUserAuthZChecker {
         _operands: Option<SmallVec<[Operand; 4]>>,
     ) -> ControlFlow<(), Self::State> {
         match intrinsic {
-            Intrinsic::ApiCall(IntrinsicName::InvokeRemote(Some(_))) => {
-                if *state == Self::State::Bare {
+            Intrinsic::ApiCall(IntrinsicName::InvokeRemote(Some(_), vid)) => {
+                if state.get(vid.0 as usize).copied() != Some(Taint::Yes) {
                     self.vulns.push(RemoteUserAuthZVuln::new(
                         interp.callstack(),
                         interp.env(),
@@ -906,10 +1099,10 @@ impl<'cx> Runner<'cx> for RemoteUserAuthZChecker {
                     ));
                     ControlFlow::Break(())
                 } else {
-                    ControlFlow::Continue(*state)
+                    ControlFlow::Continue(state.clone())
                 }
             }
-            _ => ControlFlow::Continue(*state),
+            _ => ControlFlow::Continue(state.clone()),
         }
     }
 }
@@ -1296,7 +1489,7 @@ fn api_call_name(intrinsic: &Intrinsic) -> &'static str {
             IntrinsicName::RequestBitbucket => "requestBitbucket",
             IntrinsicName::RequestGraph => "requestGraph",
             IntrinsicName::RequestCompass(_) => "requestCompass",
-            IntrinsicName::InvokeRemote(_) => "invokeRemote",
+            IntrinsicName::InvokeRemote(_, _) => "invokeRemote",
             IntrinsicName::Other => "request",
         },
         _ => "request",
@@ -2175,7 +2368,7 @@ impl<'cx> Dataflow<'cx> for PermissionDataflow {
                 ),
                 IntrinsicName::RequestCompass(_)
                 | IntrinsicName::RequestGraph
-                | IntrinsicName::InvokeRemote(_)
+                | IntrinsicName::InvokeRemote(_, _)
                 | IntrinsicName::Other => {
                     (&PermissionHashMap::new(), &HashMap::<String, Regex>::new())
                 }

@@ -639,7 +639,7 @@ pub enum IntrinsicName {
     RequestBitbucket,
     RequestGraph,
     RequestCompass(String),
-    InvokeRemote(Option<String>),
+    InvokeRemote(Option<String>, VarId),
     Other,
 }
 
@@ -1253,10 +1253,13 @@ impl FunctionAnalyzer<'_> {
             } else if *last == "invokeRemote" {
                 // In general we'd want to detect cases where we can statically infer which remote or set of remotes
                 // is being referred to
-                IntrinsicName::InvokeRemote(match first_arg {
-                    Expr::Lit(Lit::Str(str_lit)) => Some(str_lit.value.to_string()),
-                    _ => None,
-                })
+                IntrinsicName::InvokeRemote(
+                    match first_arg {
+                        Expr::Lit(Lit::Str(str_lit)) => Some(str_lit.value.to_string()),
+                        _ => None,
+                    },
+                    VarId(u32::MAX),
+                )
             } else {
                 IntrinsicName::RequestConfluence
             };
@@ -1265,7 +1268,9 @@ impl FunctionAnalyzer<'_> {
                 ApiCallKind::Unknown => {
                     if is_as_app {
                         Some(Intrinsic::ApiCall(function_name))
-                    } else if let IntrinsicName::InvokeRemote(remote_name) = &function_name {
+                    } else if let IntrinsicName::InvokeRemote(remote_name, VarId(u32::MAX)) =
+                        &function_name
+                    {
                         match remote_name {
                             Some(name) => {
                                 if suspicious_remotes.contains(name) {
