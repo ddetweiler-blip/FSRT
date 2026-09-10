@@ -247,7 +247,6 @@ pub trait Dataflow<'cx>: Sized {
                     .func_state(def)
                     .is_none_or(|old_state| old_state < state)
                 {
-                    println!("Set func state");
                     interp.set_func_state(def, state);
                     let calls = interp.called_from(def);
                     let name = interp.env().def_name(def);
@@ -261,13 +260,10 @@ pub trait Dataflow<'cx>: Sized {
             }
             Successors::One(succ) => {
                 interp.block_state_mut(def, succ).join_changed(&state);
-                println!("State modified {}", succ);
             }
             Successors::Two(succ1, succ2) => {
-                println!("State modified");
                 interp.block_state_mut(def, succ1).join_changed(&state);
                 interp.block_state_mut(def, succ2).join_changed(&state);
-                println!("State modified {} {}", succ1, succ2);
             }
         }
     }
@@ -356,7 +352,7 @@ pub trait Runner<'cx>: Sized {
         id: BasicBlockId,
         curr_state: &Self::State,
     ) -> ControlFlow<(), Self::State> {
-        println!("visiting rvalue {rvalue:?} with {curr_state:?}");
+        debug!("visiting rvalue {rvalue:?} with {curr_state:?}");
         match rvalue {
             Rvalue::Intrinsic(intrinsic, operands) => {
                 self.visit_intrinsic(interp, intrinsic, def, curr_state, Some(operands.clone()))
