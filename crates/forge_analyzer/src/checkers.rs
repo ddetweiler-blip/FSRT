@@ -29,6 +29,7 @@ use std::{
     cmp::max, collections::HashMap, collections::HashSet, iter, mem, ops::ControlFlow,
     path::PathBuf, sync::LazyLock,
 };
+use swc_core::ecma::ast::Lit;
 use time::{Date, Month, OffsetDateTime};
 use tracing::{debug, info, warn};
 
@@ -1021,7 +1022,7 @@ impl<'cx> Dataflow<'cx> for RemoteUserAuthZDataFlow {
                         let Some(Projection::Known(s)) = var.projections.first() else {
                             return initial_state;
                         };
-                        if *s == "payload" {
+                        if *s == "context" {
                             initial_state[var_id.0 as usize] = Taint::Yes;
                             self.started = true;
                         }
@@ -1052,6 +1053,7 @@ impl<'cx> Dataflow<'cx> for RemoteUserAuthZDataFlow {
     ) -> Self::State {
         if initial_state.len() < interp.body().vars.len() {
             initial_state.resize(interp.body().vars.len(), Taint::Unknown);
+            println!("Resized state vec to {}", initial_state.len())
         }
         if matches!(interp.entry.kind, EntryKind::Resolver(..)) {
             debug!("analyzing resolver");
@@ -1077,6 +1079,27 @@ impl<'cx> Dataflow<'cx> for RemoteUserAuthZDataFlow {
     }
 }
 
+fn get_taintable_var_ids(var: &Variable) -> Vec<VarId> {
+    if let Some(id) = var.as_var_id()
+        && var.projections.is_empty()
+    {
+        vec![id]
+    } else {
+        Vec::new()
+    }
+}
+
+fn get_taintable_vars(maybe_op: Option<&Operand>) -> Vec<VarId> {
+    if let Some(op) = maybe_op {
+        match op {
+            Operand::Lit(_) => Vec::new(), // Can't be tainted, right?
+            Operand::Var(var) => get_taintable_var_ids(var),
+        }
+    } else {
+        Vec::new()
+    }
+}
+
 impl<'cx> Runner<'cx> for RemoteUserAuthZChecker {
     type State = Vec<Taint>;
     type Dataflow = RemoteUserAuthZDataFlow;
@@ -1090,8 +1113,27 @@ impl<'cx> Runner<'cx> for RemoteUserAuthZChecker {
         _operands: Option<SmallVec<[Operand; 4]>>,
     ) -> ControlFlow<(), Self::State> {
         match intrinsic {
-            Intrinsic::ApiCall(IntrinsicName::InvokeRemote(Some(_), vid)) => {
-                if state.get(vid.0 as usize).copied() != Some(Taint::Yes) {
+            Intrinsic::ApiCall(IntrinsicName::InvokeRemote(Some(_), _)) => {
+                let Some(ops) = _operands else {
+                    return ControlFlow::Continue(state.clone());
+                };
+
+                for op in &ops {
+                    println!("{:?}", op);
+                }
+
+                println!("Taints {}", state.len());
+                for (n,st) in state.iter().enumerate() {
+                    println!("{} {:?}", n, st);
+                }
+
+                let vars = get_taintable_vars(ops.get(1));
+                let taints = vars
+                    .iter()
+                    .filter_map(|i| state.get(i.0 as usize))
+                    .any(|t| *t == Taint::Yes);
+
+                if !taints {
                     self.vulns.push(RemoteUserAuthZVuln::new(
                         interp.callstack(),
                         interp.env(),
