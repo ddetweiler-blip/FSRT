@@ -29,7 +29,7 @@ use std::{
     cmp::max, collections::HashMap, collections::HashSet, iter, mem, ops::ControlFlow,
     path::PathBuf, sync::LazyLock,
 };
-use swc_core::ecma::ast::Lit;
+
 use time::{Date, Month, OffsetDateTime};
 use tracing::{debug, info, warn};
 
@@ -1008,6 +1008,7 @@ impl<'cx> Dataflow<'cx> for RemoteUserAuthZDataFlow {
     ) -> Self::State {
         match inst {
             Inst::Assign(l, v) => {
+                println!("ASSIGNMENT");
                 interp.add_value_to_definition(def, l.clone(), v.clone());
                 let Some(var) = l.as_var_id() else {
                     return initial_state;
@@ -1038,6 +1039,7 @@ impl<'cx> Dataflow<'cx> for RemoteUserAuthZDataFlow {
                 initial_state
             }
             Inst::Expr(rvalue) => {
+                println!("EXPR");
                 self.transfer_rvalue(interp, def, loc, block, rvalue, initial_state)
             }
         }
@@ -1056,10 +1058,18 @@ impl<'cx> Dataflow<'cx> for RemoteUserAuthZDataFlow {
             println!("Resized state vec to {}", initial_state.len())
         }
         if matches!(interp.entry.kind, EntryKind::Resolver(..)) {
-            debug!("analyzing resolver");
             let kind = interp.body().vars.get(VarId::from(1));
+            println!(
+                "analyzing resolver {:?}",
+                interp
+                    .body()
+                    .vars
+                    .iter()
+                    .enumerate()
+                    .collect::<Vec<(usize, &VarKind)>>()
+            );
             if matches!(kind, Some(VarKind::Arg(_))) {
-                debug!("found taint start");
+                println!("found taint start");
                 initial_state[1] = Taint::Yes;
             } else {
                 debug!(first_var = ?kind, "no arguments read");
@@ -1112,6 +1122,7 @@ impl<'cx> Runner<'cx> for RemoteUserAuthZChecker {
         state: &Self::State,
         _operands: Option<SmallVec<[Operand; 4]>>,
     ) -> ControlFlow<(), Self::State> {
+        println!("Taints {}", state.len());
         match intrinsic {
             Intrinsic::ApiCall(IntrinsicName::InvokeRemote(Some(_), _)) => {
                 let Some(ops) = _operands else {
@@ -1122,8 +1133,7 @@ impl<'cx> Runner<'cx> for RemoteUserAuthZChecker {
                     println!("{:?}", op);
                 }
 
-                println!("Taints {}", state.len());
-                for (n,st) in state.iter().enumerate() {
+                for (n, st) in state.iter().enumerate() {
                     println!("{} {:?}", n, st);
                 }
 

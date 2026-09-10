@@ -247,6 +247,7 @@ pub trait Dataflow<'cx>: Sized {
                     .func_state(def)
                     .is_none_or(|old_state| old_state < state)
                 {
+                    println!("Set func state");
                     interp.set_func_state(def, state);
                     let calls = interp.called_from(def);
                     let name = interp.env().def_name(def);
@@ -260,10 +261,13 @@ pub trait Dataflow<'cx>: Sized {
             }
             Successors::One(succ) => {
                 interp.block_state_mut(def, succ).join_changed(&state);
+                println!("State modified {}", succ);
             }
             Successors::Two(succ1, succ2) => {
+                println!("State modified");
                 interp.block_state_mut(def, succ1).join_changed(&state);
                 interp.block_state_mut(def, succ2).join_changed(&state);
+                println!("State modified {} {}", succ1, succ2);
             }
         }
     }
@@ -352,7 +356,7 @@ pub trait Runner<'cx>: Sized {
         id: BasicBlockId,
         curr_state: &Self::State,
     ) -> ControlFlow<(), Self::State> {
-        trace!("visiting rvalue {rvalue:?} with {curr_state:?}");
+        println!("visiting rvalue {rvalue:?} with {curr_state:?}");
         match rvalue {
             Rvalue::Intrinsic(intrinsic, operands) => {
                 self.visit_intrinsic(interp, intrinsic, def, curr_state, Some(operands.clone()))
@@ -375,7 +379,10 @@ pub trait Runner<'cx>: Sized {
         curr_state: &Self::State,
     ) -> ControlFlow<(), Self::State> {
         interp.runner_visited.borrow_mut().insert((def, id));
-        let mut curr_state = interp.block_state(def, id).join(curr_state);
+        let before = interp.block_state(def, id);
+        let right = curr_state;
+        let mut curr_state = before.join(curr_state);
+        println!("L: {:?} R: {:?} A: {:?}", before, right, curr_state);
         for (idx, stmt) in block.iter().enumerate() {
             let loc = Location::new(id, idx as u32);
             curr_state = self.visit_inst(interp, def, loc, stmt, &curr_state)?;
@@ -1605,6 +1612,7 @@ impl<'cx, C: Runner<'cx>> Interp<'cx, C> {
             Error::NotAFunction(name.to_owned())
         })?;
         self.set_body(body);
+        println!("Now checking {} {}", resolved_def.0, name);
         self.run(resolved_def);
         if C::VISIT_GLOBALS {
             for &global in &self.env.global {
@@ -1612,7 +1620,11 @@ impl<'cx, C: Runner<'cx>> Interp<'cx, C> {
                 _ = checker.visit_body(self, global, global_body, &C::State::BOTTOM);
             }
         }
+
+        println!("Executed {} {}", resolved_def.0, name);
+        // ???
         _ = checker.visit_body(self, resolved_def, body, &C::State::BOTTOM);
+        println!("Checked {} {}", resolved_def.0, name);
         self.runner_visited.borrow_mut().clear();
         Ok(())
     }

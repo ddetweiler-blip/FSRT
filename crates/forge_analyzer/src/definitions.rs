@@ -69,7 +69,7 @@ create_newtype! {
 }
 
 create_newtype! {
-    pub struct DefId(u32);
+    pub struct DefId(pub u32);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
