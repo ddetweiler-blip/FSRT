@@ -1118,7 +1118,7 @@ impl fmt::Display for Inst {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Inst::Expr(rval) => write!(f, "_ = {rval}"),
-            Inst::Assign(lval, rval) => write!(f, "{lval} = {rval}"),
+            Inst::Assign(lval, rval) => write!(f, "{lval} = {rval} ({:?})", rval),
         }
     }
 }

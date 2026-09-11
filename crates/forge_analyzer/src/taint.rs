@@ -7,6 +7,7 @@
 //! Object properties and external calls are conservatively treated as propagators;
 //! function summaries are context insensitive (shared across call sites).
 
+use core::fmt;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     marker::PhantomData,
@@ -96,11 +97,16 @@ impl TaintPolicy for SecretTaint {
     }
 }
 
+// help me
 pub fn operand_taint(state: &[Taint], operand: &Operand) -> Taint {
-    match operand {
+    let taint = match operand {
         Operand::Var(var) => var.as_var_id().map_or(Taint::No, |id| var_taint(state, id)),
         Operand::Lit(_) => Taint::No,
-    }
+    };
+
+    println!("operand_taint {:?} {:?} => {:?}", state, operand, taint);
+
+    taint
 }
 
 fn var_taint(state: &[Taint], id: VarId) -> Taint {
@@ -318,6 +324,23 @@ impl<'cx, P: TaintPolicy> Dataflow<'cx> for TaintDataflow<P> {
         state
     }
 
+    // fn transfer_inst<C: Runner<'cx, State = Self::State>>(
+    //     &mut self,
+    //     interp: &mut Interp<'cx, C>,
+    //     def: DefId,
+    //     loc: Location,
+    //     block: &'cx BasicBlock,
+    //     inst: &'cx Inst,
+    //     initial_state: Self::State,
+    // ) -> Self::State
+    // {
+    //     let Inst::Assign(l, r) = inst else {
+    //         return initial_state;
+    //     }
+
+    //     if initial_state.get(r)
+    // }
+
     fn analyze<C: Runner<'cx, State = Self::State>>(
         &mut self,
         interp: &mut Interp<'cx, C>,
@@ -426,6 +449,7 @@ impl<'cx, P: TaintPolicy> Dataflow<'cx> for TaintDataflow<P> {
                         }
                     }
                 };
+                // This is not behaving the way I expect it to
                 if let Inst::Assign(var, _) = inst
                     && let Base::Var(id) = var.base
                 {
@@ -443,6 +467,8 @@ impl<'cx, P: TaintPolicy> Dataflow<'cx> for TaintDataflow<P> {
                         }
                     }
                 }
+
+                println!("post_state {:?}", &frame.vars);
             }
 
             let successors: SmallVec<[BasicBlockId; 2]> = match block.successors() {
